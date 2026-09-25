@@ -279,6 +279,59 @@ class ReActAgent:
     # ------------------------------------------------------------------
     # 对外入口
     # ------------------------------------------------------------------
+    def _direct_route(self, question: str, started: float,
+                      session_id: str | None) -> AgentResult | None:
+        """规则路由：能用规则判定意图的问题直接调工具，跳过整个 ReAct 循环。
+
+        见构建书 §5.3.3「工具选择路由：根据问题类型快速路由到对应工具，
+        减少无效推理轮次」。纯算术、问时间这类问题走完整 ReAct 只是白烧
+        token（一次 LLM 调用 + 一轮工具往返），规则既然能判定就该短路。
+
+        返回 None 表示「判定不了，交给完整 ReAct 循环」。
+        """
+        if not settings.enable_router:
+            return None
+        try:
+            from agent.router import classify
+
+            decision = classify(question)
+        except Exception as exc:  # noqa: BLE001 - 路由本身出问题不该影响作答
+            logger.debug("规则路由失败，回退 ReAct 循环：%s", exc)
+            return None
+
+        if decision.kind != "direct_tool" or not decision.tool:
+            return None
+        tool = self.tools.get(decision.tool)
+        if tool is None:
+            # 该工具没注册（例如只注册了子集），老实退回 ReAct，别假装答了
+            logger.debug("路由命中 %s 但该工具未注册，回退 ReAct", decision.tool)
+            return None
+
+        args = dict(decision.args or {})
+        call_start = time.perf_counter()
+        observation = self.executor.run_one(tool, args)
+        step = AgentStep(
+            index=0,
+            thought=f"规则路由：{decision.reason}",
+            action=decision.tool,
+            action_input=args,
+            observation=observation,
+            latency_ms=_elapsed_ms(call_start),
+            tokens=0,
+            error=None,
+        )
+        answer = observation or "（工具没有返回内容）"
+        self._remember(session_id, question, answer, [])
+        return AgentResult(
+            answer=answer,
+            citations=[],
+            steps=[step],
+            tokens={"prompt": 0, "completion": 0},
+            latency_ms={"retrieve": 0, "generate": 0, "total": _elapsed_ms(started)},
+            route="direct_tool",
+            degraded=None,
+        )
+
     def run(
         self,
         question: str,
@@ -298,6 +351,12 @@ class ReActAgent:
         if isinstance(history, str) and session_id is None:  # 兼容 run(question, sid)
             history, session_id = None, history
         text = (question or "").strip()
+
+        # ---- 规则路由短路：能用规则判定意图的问题不必进 ReAct 循环 ----
+        if text:
+            direct = self._direct_route(text, started, self._resolve_session(session_id))
+            if direct is not None:
+                return direct
 
         steps: list[AgentStep] = []
         observations: list[str] = []

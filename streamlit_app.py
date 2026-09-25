@@ -80,6 +80,24 @@ def answer_once(question: str, session_id: str) -> AgentResult:
                            latency_ms={"total": 0}, route="empty", degraded="empty_question")
 
     retriever = _get_retriever()
+
+    # 空知识库 + 需要检索的问题 → 直接给明确提示。
+    # 这是作业明确要求的边缘场景（「空知识库提问 → 提示知识库为空，请先上传文档，
+    # 不抛异常」）。纯算术 / 问时间这类不需要知识库的问题仍照常走到工具路由，
+    # 所以这里必须先问一次 router。
+    from agent.router import classify
+
+    if retriever.vectorstore.count() == 0 and retriever.bm25.count() == 0:
+        if classify(question).kind == "agent":
+            return AgentResult(
+                answer=(
+                    "⚠️ 知识库为空，请先在左侧上传论文（支持 PDF / DOCX / TXT / MD）。\n\n"
+                    "上传后系统会先建立索引，再基于你的文献回答问题。"
+                ),
+                citations=[], steps=[], tokens={}, latency_ms={"total": 0},
+                route="empty_kb", degraded="empty_knowledge_base",
+            )
+
     llm = _get_llm()
     memory = _get_memory()
     recorder = _get_recorder()

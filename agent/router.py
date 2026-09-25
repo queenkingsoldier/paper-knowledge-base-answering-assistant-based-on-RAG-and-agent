@@ -38,6 +38,28 @@ _TIME_MAX_LEN = 30
 
 _MIN_FRAGMENT_LEN = 3  # "1+1" 恰好 3 个字符，是能被接受的最短算式
 
+# 中文口语里的运算符。用户写「3.14 乘以 2.56」而不是「3.14 * 2.56」是很自然的，
+# 构建书 §5.3.1 举的例子恰好就是「3.14乘以2.56」，所以必须支持。
+# 顺序很重要：长词必须排在短词前面，否则「乘以」会先被「乘」拆掉。
+_CN_OPERATORS: tuple[tuple[str, str], ...] = (
+    ("乘以", "*"), ("乘上", "*"), ("乘", "*"),
+    ("除以", "/"), ("除", "/"),
+    ("加上", "+"), ("加", "+"),
+    ("减去", "-"), ("减", "-"),
+)
+
+
+def _normalize_cn_operators(text: str) -> str:
+    """把中文运算符词替换成符号，并在两侧补空格以免粘连数字。
+
+    「加速度」这类词里的「加」也会被替换，但它不会造成误判：算式判定还要求
+    片段里至少有**两个数字**，`"+ 速度"` 只有一个数字，会被拒绝。
+    """
+    out = text
+    for word, symbol in _CN_OPERATORS:
+        out = out.replace(word, f" {symbol} ")
+    return out
+
 
 @dataclass
 class RouteDecision:
@@ -66,10 +88,14 @@ def _looks_like_expression(text: str) -> bool:
 def _extract_expression(question: str) -> str | None:
     """从夹带中文的问题里抽出最长的数字表达式片段。
 
-    `"3.14 * 2.56 等于多少"` → `"3.14 * 2.56"`；`"3.14"` → None（没有运算符）；
-    `"论文1和论文2的区别"` → None（片段太短）。
+    中文口语里的运算符会先被归一化成符号，因此
+    `"3.14 乘以 2.56 等于多少"`、`"3.14 * 2.56 等于多少"` 都能抽出 `"3.14 * 2.56"`。
+
+    必须同时满足「有运算符」且「至少两个数字」才算算式——这条约束让
+    `"3.14"`（纯数字）、`"论文1和论文2的区别"`（两个数字但无运算符）都不会被误判。
     """
-    fragments = [f.strip() for f in _EXPR_FRAGMENT_RE.findall(question)]
+    normalized = _normalize_cn_operators(question)
+    fragments = [f.strip() for f in _EXPR_FRAGMENT_RE.findall(normalized)]
     candidates = [f for f in fragments if len(f) >= _MIN_FRAGMENT_LEN]
     if not candidates:
         return None

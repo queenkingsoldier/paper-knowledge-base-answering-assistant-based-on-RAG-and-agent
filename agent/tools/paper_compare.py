@@ -37,7 +37,10 @@ NOT_INITIALIZED = "错误：检索引擎未初始化，无法对比论文。请�
 #: 单给 `aspect`（如 "method"）太短，向量与 BM25 都容易召回到摘要里的泛泛之谈。
 QUERY_TEMPLATE = "{aspect} 方法 数据集 结果"
 
-MAX_SNIPPET_CHARS = 800
+#: 同 `kb_search`：512 token 的切片在英文下约 2000+ 字符，3000 的上限不会截断
+#: 任何正常切片，只兜住病态超长片段。
+MAX_SNIPPET_CHARS = 3000
+
 _WS_RE = re.compile(r"\s+")
 
 #: 模块级引擎引用，由 `build_agent()` 通过 `set_engine()` 注入。
