@@ -25,6 +25,7 @@ eval/reports/*
 .tmp/
 ~$*
 *.tmp
+pytest-cache-files-*/
 
 # ===== 编辑器 / 系统 =====
 .vscode/
