@@ -1,0 +1,33 @@
+# ===== 密钥：绝不入库 =====
+.env
+.env.local
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 运行时产物 =====
+storage/
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+eval/reports/*
+!eval/reports/.gitkeep
+
+# ===== 临时文件 =====
+.tmp/
+~$*
+*.tmp
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
