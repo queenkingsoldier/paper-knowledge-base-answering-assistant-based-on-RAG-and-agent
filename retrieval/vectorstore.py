@@ -225,3 +225,25 @@ class VectorStore:
         except Exception as exc:  # noqa: BLE001 - 健康检查不该自己抛异常
             logger.warning("向量库健康检查失败: %s", exc)
             return False, str(exc)
+
+    def iter_chunks(self, doc_id: str | None = None) -> list[dict]:
+        """按文档列出 chunk 明细（chunk_id / text / page_no / seq）。
+
+        公开方法，供 `scripts/build_index.py --dump-chunks` 导出评测集标注所需的
+        chunk 清单。之前脚本直接读了 `_collection`，那是私有内部状态，
+        这里补上一个稳定的公开出口。
+        """
+        where = {"doc_id": doc_id} if doc_id else None
+        got = self._collection.get(where=where, include=["documents", "metadatas"])
+        out: list[dict] = []
+        for cid, text, meta in zip(got["ids"], got["documents"], got["metadatas"]):
+            meta = meta or {}
+            out.append({
+                "chunk_id": cid,
+                "doc_id": str(meta.get("doc_id", "")),
+                "filename": str(meta.get("filename", "")),
+                "page_no": int(meta.get("page_no", 0) or 0),
+                "seq": int(meta.get("seq", 0) or 0),
+                "text": text or "",
+            })
+        return out

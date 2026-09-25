@@ -112,13 +112,12 @@ def main(argv: list[str] | None = None) -> int:
         n = 0
         with out.open("w", encoding="utf-8") as f:
             for doc_id, filename in docs.items():
-                got = retriever.vectorstore._collection.get(where={"doc_id": doc_id})
-                for cid, text, meta in zip(got["ids"], got["documents"], got["metadatas"]):
+                for row in retriever.vectorstore.iter_chunks(doc_id):
                     f.write(json.dumps({
-                        "chunk_id": cid,
+                        "chunk_id": row["chunk_id"],
                         "filename": filename,
-                        "page_no": meta.get("page_no"),
-                        "preview": (text or "")[:80].replace("\n", " "),
+                        "page_no": row["page_no"],
+                        "preview": row["text"][:80].replace("\n", " "),
                     }, ensure_ascii=False) + "\n")
                     n += 1
         print(f"\n  chunk 清单已导出（{n} 条）: {out}")

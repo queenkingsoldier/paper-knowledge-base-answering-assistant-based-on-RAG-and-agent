@@ -15,7 +15,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_file 用绝对路径：相对路径会相对于「当前工作目录」解析，
+    # 从别的目录启动 streamlit / 脚本时就会静默读不到 .env。
+    model_config = SettingsConfigDict(env_file=str(PROJECT_ROOT / ".env"), extra="ignore")
 
     # ---- Provider 开关（mock 用于无 key 全链路验证）----
     llm_provider: str = "deepseek"  # deepseek | mock
