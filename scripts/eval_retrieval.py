@@ -93,8 +93,22 @@ def load_qa(path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def evaluate(retriever, qa_pairs: list[dict], modes: list[str], ks: list[int]) -> pd.DataFrame:
-    """遍历 问题 × 模式，产出指标汇总表。"""
+def evaluate(retriever, qa_pairs: list[dict], modes: list[str], ks: list[int],
+             gold_level: str = "chunk") -> pd.DataFrame:
+    """遍历 问题 × 模式，产出指标汇总表。
+
+    `gold_level` 决定用什么作为「正确答案」：
+
+    - `chunk`（默认）：用 `gold_chunk_ids`。粒度细，能反映「是否精确定位到那一段」。
+      但它**与分块方式绑定**——换了 chunk_size 或分块策略，chunk_id 全变，同一份
+      评测集就不再适用。
+    - `doc`：用 `gold_doc_ids`，即「是否召回了正确文档里的任意片段」。
+      它**与分块方式无关**，因此是横向比较不同 chunk_size / 分块策略时唯一
+      公平的口径。做分块消融实验必须用这个。
+    """
+    if gold_level not in ("chunk", "doc"):
+        raise ValueError(f"gold_level 只能是 chunk 或 doc，收到 {gold_level!r}")
+
     max_k = max(ks)
     rows: list[dict] = []
 
@@ -105,18 +119,33 @@ def evaluate(retriever, qa_pairs: list[dict], modes: list[str], ks: list[int]) -
         degraded = 0
 
         for item in qa_pairs:
-            gold = set(item.get("gold_chunk_ids") or [])
+            if gold_level == "chunk":
+                gold = set(item.get("gold_chunk_ids") or [])
+            else:
+                gold = set(item.get("gold_doc_ids") or [])
+            if not gold:
+                # 该问题本就不该检索知识库（纯算术 / 问时间），跳过不计分
+                continue
+
             result = retriever.search(item["question"], mode=mode, top_k=max_k)
             if result.degraded:
                 degraded += 1
-            ranked = [sc.chunk.chunk_id for sc in result.chunks]
+            if gold_level == "chunk":
+                ranked = [sc.chunk.chunk_id for sc in result.chunks]
+            else:
+                # 文档级：按文档去重后排名，取每个文档首次出现的位置
+                seen: list[str] = []
+                for sc in result.chunks:
+                    if sc.chunk.doc_id not in seen:
+                        seen.append(sc.chunk.doc_id)
+                ranked = seen
             for k in ks:
                 acc[k].append(hit_at_k(ranked, gold, k))
                 recalls[k].append(recall_at_k(ranked, gold, k))
             rrs.append(reciprocal_rank(ranked, gold))
 
-        n = len(qa_pairs) or 1
-        row = {"mode": mode, "n": len(qa_pairs)}
+        n = len(rrs) or 1
+        row = {"mode": mode, "n": len(rrs)}
         for k in ks:
             row[f"hit@{k}"] = round(sum(acc[k]) / n, 4)
         for k in ks:
@@ -157,6 +186,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--qa", default="eval/qa_set_demo.jsonl", help="评测集 JSONL 路径")
     parser.add_argument("--modes", nargs="+", default=["vector", "hybrid", "hybrid_rerank"])
     parser.add_argument("--ks", nargs="+", type=int, default=[1, 3, 5])
+    parser.add_argument("--gold-level", choices=["chunk", "doc"], default="chunk",
+                        help="chunk=用 gold_chunk_ids 精确匹配；"
+                             "doc=用 gold_doc_ids 文档级匹配。"
+                             "比较不同分块参数时必须用 doc，否则 chunk_id 变了不可比。")
     parser.add_argument("--out", default=None, help="CSV 输出路径")
     args = parser.parse_args(argv)
 
@@ -179,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[FAIL] 知识库为空，请先运行 python scripts/build_index.py <目录>")
         return 1
 
-    df = evaluate(retriever, qa_pairs, args.modes, args.ks)
+    df = evaluate(retriever, qa_pairs, args.modes, args.ks, gold_level=args.gold_level)
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -188,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     plot_comparison(df, args.ks, REPORT_DIR / f"retrieval_compare_{stamp}.png")
 
     print(f"\n评测集: {qa_path}  (共 {len(qa_pairs)} 条)")
+    print(f"评分口径: {'chunk 级（gold_chunk_ids）' if args.gold_level == 'chunk' else 'doc 级（gold_doc_ids，与分块无关）'}")
     print(df.to_string(index=False))
     print(f"\n已写出: {csv_path}")
     return 0

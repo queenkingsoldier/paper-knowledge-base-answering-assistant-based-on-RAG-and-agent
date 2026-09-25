@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import re
 from abc import ABC, abstractmethod
@@ -430,15 +431,29 @@ class SemanticChunker(BaseChunker):
 
 
 def get_chunker(strategy: str | None = None, **kw) -> BaseChunker:
-    """按策略名构造 chunker。未知策略直接抛 `ValueError`（配置错误要早暴露）。"""
+    """按策略名构造 chunker。未知策略直接抛 `ValueError`（配置错误要早暴露）。
+
+    只把目标类真正接受的参数转发过去。三种策略的构造参数并不一致——
+    `SemanticChunker` 没有 `overlap`（语义块之间靠向量断点衔接，再叠文本
+    重叠只会重复占用上下文预算）。若不加过滤，调用方统一传
+    `chunk_size=..., overlap=...` 时 semantic 会直接抛 TypeError，
+    而只传 `strategy` 的单元测试发现不了这个问题。
+    """
     name = (strategy or settings.chunk_strategy or "").strip().lower()
-    if name == "fixed":
-        return FixedChunker(**kw)
-    if name == "recursive":
-        return RecursiveChunker(**kw)
-    if name == "semantic":
-        return SemanticChunker(**kw)
-    raise ValueError(f"未知的分块策略：{strategy!r}；可选 fixed | recursive | semantic")
+    registry: dict[str, type[BaseChunker]] = {
+        "fixed": FixedChunker,
+        "recursive": RecursiveChunker,
+        "semantic": SemanticChunker,
+    }
+    cls = registry.get(name)
+    if cls is None:
+        raise ValueError(f"未知的分块策略：{strategy!r}；可选 fixed | recursive | semantic")
+    accepted = inspect.signature(cls).parameters
+    forwarded = {k: v for k, v in kw.items() if k in accepted}
+    dropped = set(kw) - set(forwarded)
+    if dropped:
+        logger.debug("策略 %s 不接受参数 %s，已忽略", name, sorted(dropped))
+    return cls(**forwarded)
 
 
 # -------------------------------------------------------------- 学术文本特化

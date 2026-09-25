@@ -377,31 +377,87 @@ _MOCK_ANSWER = (
 
 
 class MockLLM(LLMProvider):
-    """固定话术的伪 LLM，同时能产生合法的 ReAct 输出。"""
+    """固定话术的伪 LLM，同时能产生合法的 ReAct 输出。
+
+    行为：在 ReAct 场景下先发一次 `kb_search`，看到 Observation 后再 `Finish`。
+    这样 mock 模式跑出来的也是**真实的两步轨迹 + 引用**，而不是一步即答的空壳——
+    否则「全链路可验证」就只是句空话。
+    """
+
+    # _force_conclude 的指令措辞（agent/react.py）。命中它就不再输出 Action 协议，
+    # 只给答案正文，避免把「Action: Finish」当最终答案返回。
+    _FORCE_CONCLUDE_MARKER = "不要再调用任何工具"
 
     def __init__(self) -> None:
         self.last_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0}
         self._answer = _MOCK_ANSWER
 
     @staticmethod
-    def _wants_react(messages: list[dict]) -> bool:
-        joined = " ".join(str(m.get("content", "")) for m in messages)
+    def _joined(messages: list[dict]) -> str:
+        return " ".join(str(m.get("content", "")) for m in messages)
+
+    @classmethod
+    def _wants_react(cls, messages: list[dict]) -> bool:
+        joined = cls._joined(messages)
         return "Action:" in joined or "可用工具" in joined or "Action Input" in joined
 
-    def complete(self, messages: list[dict], **kwargs: Any) -> str:
-        prompt_tokens = sum(
-            max(1, len(str(m.get("content", ""))) // 3) for m in messages
+    @staticmethod
+    def _has_observation(messages: list[dict]) -> bool:
+        """工具结果是以 user 角色、以 'Observation:' 开头的消息（见 agent/react.py）。"""
+        return any(
+            str(m.get("role")) == "user"
+            and str(m.get("content", "")).startswith("Observation:")
+            for m in messages
         )
-        if self._wants_react(messages):
-            # 产出合法且可解析的 ReAct 终止动作，使 Agent 在全 mock 下也能收敛。
-            body = json.dumps({"answer": self._answer}, ensure_ascii=False)
-            text = (
-                "Thought: 已获得足够信息，直接给出最终答案。\n"
-                "Action: Finish\n"
-                f"Action Input: {body}"
-            )
+
+    @staticmethod
+    def _extract_question(messages: list[dict]) -> str:
+        """取出原始用户问题（跳过 Observation 与强制收敛指令）。"""
+        for m in messages:
+            if str(m.get("role")) != "user":
+                continue
+            content = str(m.get("content", ""))
+            if content.startswith("Observation:") or "不要再调用任何工具" in content:
+                continue
+            return content.strip()
+        return "论文"
+
+    def complete(self, messages: list[dict], **kwargs: Any) -> str:
+        prompt_tokens = sum(max(1, len(str(m.get("content", ""))) // 3) for m in messages)
+        joined = self._joined(messages)
+
+        if self._FORCE_CONCLUDE_MARKER in joined:
+            text = self._answer
+        elif self._wants_react(messages):
+            if self._has_observation(messages):
+                body = json.dumps({"answer": self._answer}, ensure_ascii=False)
+                text = (
+                    "Thought: 已从知识库拿到观察结果，信息足够，直接给出最终答案。\n"
+                    "Action: Finish\n"
+                    f"Action Input: {body}"
+                )
+            elif "kb_search" in joined:
+                # 第一次进入循环：先检索一次，让轨迹里出现真实的 Action/Observation
+                body = json.dumps(
+                    {"query": self._extract_question(messages), "top_k": 5},
+                    ensure_ascii=False,
+                )
+                text = (
+                    "Thought: 需要先查知识库里与问题相关的内容。\n"
+                    "Action: kb_search\n"
+                    f"Action Input: {body}"
+                )
+            else:
+                # 没有 kb_search 工具时不要瞎调，直接收尾
+                body = json.dumps({"answer": self._answer}, ensure_ascii=False)
+                text = (
+                    "Thought: 没有可用的检索工具，直接作答。\n"
+                    "Action: Finish\n"
+                    f"Action Input: {body}"
+                )
         else:
             text = self._answer
+
         self.last_usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": max(1, len(text) // 3),

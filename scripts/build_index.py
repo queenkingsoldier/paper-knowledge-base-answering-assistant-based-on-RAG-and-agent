@@ -67,10 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     retriever = build_retriever()
 
     if args.rebuild:
+        # 必须同时清空向量库与关键词索引。只清向量库的话，换了分块参数后
+        # 旧 chunk 中 chunk_id 未碰撞的条目会残留在 BM25 里，
+        # 造成「检索到已不存在的片段」。
         removed = 0
         for doc in retriever.vectorstore.list_documents():
             removed += retriever.vectorstore.delete_document(doc["doc_id"])
-        print(f"[重建] 已清空向量库（{removed} 个 chunk）")
+        dropped = retriever.bm25.clear()
+        retriever.bm25.save()
+        print(f"[重建] 已清空向量库（{removed} 个 chunk）与 BM25 索引（{dropped} 个 chunk）")
 
     strategy = args.strategy or settings.chunk_strategy
     chunk_size = args.chunk_size or settings.chunk_size

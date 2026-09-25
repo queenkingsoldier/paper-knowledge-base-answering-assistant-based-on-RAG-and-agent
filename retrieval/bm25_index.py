@@ -110,6 +110,18 @@ class BM25Index:
             self._rebuild()
             logger.info("BM25 索引增量添加 %d 个 chunk，当前总计 %d", added, len(self.order))
 
+    def clear(self) -> int:
+        """清空索引，返回被清除的 chunk 数。
+
+        重建索引时必须同时清空向量库与关键词索引，否则换了分块参数之后，
+        旧 chunk 里那些 chunk_id 未发生碰撞的条目会残留在 BM25 里，
+        造成「检索到已不存在的片段」。`build([])` 也能达到同样效果，
+        这个方法只是让调用方的意图更直白。
+        """
+        n = len(self.order)
+        self.build([])
+        return n
+
     def remove_document(self, doc_id: str) -> int:
         removed = [cid for cid in self.order if self.chunks[cid].doc_id == doc_id]
         if not removed:
