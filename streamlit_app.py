@@ -33,6 +33,57 @@ from observability.trace import TraceRecorder  # noqa: E402
 from retrieval.hybrid import build_retriever  # noqa: E402
 
 # ---------------------------------------------------------------------------
+# 布局常量
+# ---------------------------------------------------------------------------
+
+# 三栏各自独立滚动，所以每栏需要一个确定的高度。
+# `"stretch"` 让容器自适应视口剩余高度（Streamlit >= 1.29 支持 int | "stretch"）。
+# 若在某些环境下 stretch 表现不对（比如容器塌成 0 高），把这里改成整数像素值
+# （例如 640）即可，不需要动其它任何代码。
+PANEL_HEIGHT: int | str = "stretch"
+
+
+# ---------------------------------------------------------------------------
+# 上传区状态管理
+# ---------------------------------------------------------------------------
+
+
+def _uploader_key() -> str:
+    """当前这一轮要用的上传控件 key。
+
+    Streamlit 按 key 归置控件状态，因此**换 key 就等于换一个全新的空控件**。
+    `st.file_uploader` 没有官方的清空接口，这是让上传区在入库成功后恢复空白的
+    干净做法：入库完把 seq 加一，下一轮渲染出来的就是一个没挂任何文件的新控件。
+    """
+    return f"uploader_{int(st.session_state.get('uploader_seq', 0))}"
+
+
+def _reset_uploader() -> None:
+    """让下一次渲染使用全新的上传控件（旧控件连同已选文件一并被丢弃）。"""
+    # 用下标赋值而不是属性赋值：两者在真实 session_state 上等价，
+    # 但下标写法在普通 dict 上也成立，便于脱离 Streamlit 运行时单测这段逻辑。
+    st.session_state["uploader_seq"] = int(st.session_state.get("uploader_seq", 0)) + 1
+
+
+def _flash_ingest_report() -> None:
+    """显示上一轮入库的结果，只显示一次。
+
+    必须在入库之后的**下一轮**才显示：入库函数末尾会 `st.rerun()` 去刷新文档
+    列表，如果就地 `st.success()`，那条消息会被紧接着的重跑冲掉——用户其实
+    从来没看到过入库结果。所以结果先暂存到 session_state，重跑后再取出来显示。
+    """
+    flash = st.session_state.pop("ingest_flash", None)
+    if not flash:
+        return
+    st.success(
+        f"入库完成：成功 {flash['ok']} · 跳过 {flash['skipped']}（内容未变）· "
+        f"失败 {flash['failed']} · 新增 {flash['chunks']} 块 · {flash['ms']} ms"
+    )
+    for e in flash.get("errors", []):
+        st.error(f"{e['filename']}：{e['error']}")
+
+
+# ---------------------------------------------------------------------------
 # 资源获取（Streamlit 无关，便于测试替换）
 # ---------------------------------------------------------------------------
 
@@ -201,7 +252,7 @@ def _upload_panel() -> None:
         "支持 PDF / DOCX / TXT / MD，可多选",
         type=[e.lstrip(".") for e in sorted(SUPPORTED_EXTS)],
         accept_multiple_files=True,
-        key="uploader",
+        key=_uploader_key(),
     )
     if not files:
         return
@@ -230,12 +281,18 @@ def _upload_panel() -> None:
     report = pipeline.ingest_paths(paths, progress_cb=on_progress)
     bar.empty()
 
-    st.success(
-        f"入库完成：成功 {report.files_ok} · 跳过 {report.files_skipped}（内容未变）· "
-        f"失败 {report.files_failed} · 新增 {report.chunks_added} 块 · {report.elapsed_ms} ms"
-    )
-    for e in report.errors:
-        st.error(f"{e['filename']}：{e['error']}")
+    # 结果暂存到 session_state：下面紧接着的 st.rerun() 会立刻重跑脚本，
+    # 就地 st.success() 的话消息会被冲掉，用户看不到任何反馈。
+    st.session_state.ingest_flash = {
+        "ok": report.files_ok,
+        "skipped": report.files_skipped,
+        "failed": report.files_failed,
+        "chunks": report.chunks_added,
+        "ms": report.elapsed_ms,
+        "errors": list(report.errors),
+    }
+    # 换掉上传控件 key，使下一轮渲染出一个没挂任何文件的新控件（上传区复位）
+    _reset_uploader()
     st.rerun()
 
 
@@ -263,6 +320,9 @@ def main() -> None:
         st.session_state.messages = []
     if "last_result" not in st.session_state:
         st.session_state.last_result = None
+    if "uploader_seq" not in st.session_state:
+        # 上传控件的代次。入库成功后自增，从而换出一个空的上传控件。
+        st.session_state.uploader_seq = 0
 
     # ---- 侧栏：会话管理 ----
     with st.sidebar:
@@ -289,77 +349,89 @@ def main() -> None:
     left, center, right = st.columns([1, 2.4, 1.4])
 
     with left:
-        _upload_panel()
-        st.divider()
-        _doc_panel()
+        # 独立滚动区：中栏对话再长，左栏也始终留在屏幕内，不会被落在页面上方
+        with st.container(height=PANEL_HEIGHT):
+            _flash_ingest_report()
+            _upload_panel()
+            st.divider()
+            _doc_panel()
 
     with center:
         st.subheader("💬 对话")
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                if msg.get("citations"):
-                    _render_citations(msg["citations"])
+        # 只有消息列表进滚动区。`st.chat_input` 必须留在容器**外面**，
+        # 否则输入框会跟着对话一起被滚走。
+        with st.container(height=PANEL_HEIGHT):
+            for msg in st.session_state.messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+                    if msg.get("citations"):
+                        _render_citations(msg["citations"])
+            # 占位子容器：本轮对话要写在滚动区**内部**，但问题得等
+            # chat_input 返回后才知道，所以先占位、后填充。
+            new_turn = st.container()
 
         question = st.chat_input("就你的论文库提问，例如：ViT 用了什么数据集预训练？")
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
-            with st.chat_message("user"):
-                st.markdown(question)
+            with new_turn:
+                with st.chat_message("user"):
+                    st.markdown(question)
 
-            with st.chat_message("assistant"):
-                if mode.startswith("⚡"):
-                    from generation.rag import RAGEngine
+                with st.chat_message("assistant"):
+                    if mode.startswith("⚡"):
+                        from generation.rag import RAGEngine
 
-                    engine = RAGEngine(retriever=_get_retriever(), llm=_get_llm())
-                    text_holder = st.empty()
-                    acc = ""
-                    raw_citations: list = []
-                    for ev in engine.stream_answer(question):
-                        if ev["type"] == "citations":
-                            raw_citations = ev["citations"]
-                        elif ev["type"] == "token":
-                            acc += ev["text"]
-                            text_holder.markdown(acc + "▌")
-                        elif ev["type"] == "error":
-                            st.error(ev["message"])
-                    text_holder.markdown(acc or "（无输出）")
-                    # 事件里的引用是 dict，转成 Citation 后再渲染与入历史，
-                    # 保证两条路径（Agent / RAG）存进 messages 的类型一致。
-                    citations = [Citation(**c) if isinstance(c, dict) else c
-                                 for c in raw_citations]
-                    _render_citations(citations)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": acc, "citations": citations}
-                    )
-                else:
-                    with st.status("Agent 正在推理…", expanded=False) as status:
-                        result = answer_once(question, st.session_state.session_id)
-                        status.update(
-                            label=f"完成（{len(result.steps)} 步推理，{result.latency_ms.get('total', 0)} ms）",
-                            state="complete",
+                        engine = RAGEngine(retriever=_get_retriever(), llm=_get_llm())
+                        text_holder = st.empty()
+                        acc = ""
+                        raw_citations: list = []
+                        for ev in engine.stream_answer(question):
+                            if ev["type"] == "citations":
+                                raw_citations = ev["citations"]
+                            elif ev["type"] == "token":
+                                acc += ev["text"]
+                                text_holder.markdown(acc + "▌")
+                            elif ev["type"] == "error":
+                                st.error(ev["message"])
+                        text_holder.markdown(acc or "（无输出）")
+                        # 事件里的引用是 dict，转成 Citation 后再渲染与入历史，
+                        # 保证两条路径（Agent / RAG）存进 messages 的类型一致。
+                        citations = [Citation(**c) if isinstance(c, dict) else c
+                                     for c in raw_citations]
+                        _render_citations(citations)
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": acc, "citations": citations}
                         )
-                    st.markdown(result.answer)
-                    _render_citations(result.citations)
-                    st.session_state.last_result = result
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": result.answer,
-                         "citations": result.citations}
-                    )
+                    else:
+                        with st.status("Agent 正在推理…", expanded=False) as status:
+                            result = answer_once(question, st.session_state.session_id)
+                            status.update(
+                                label=f"完成（{len(result.steps)} 步推理，{result.latency_ms.get('total', 0)} ms）",
+                                state="complete",
+                            )
+                        st.markdown(result.answer)
+                        _render_citations(result.citations)
+                        st.session_state.last_result = result
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": result.answer,
+                             "citations": result.citations}
+                        )
 
     with right:
-        st.subheader("🔍 可观测")
-        if st.session_state.last_result is not None:
-            res = st.session_state.last_result
-            _render_trace(res)
+        # 与左栏同理：独立滚动区，长对话下不会把轨迹面板甩到视口外
+        with st.container(height=PANEL_HEIGHT):
+            st.subheader("🔍 可观测")
+            if st.session_state.last_result is not None:
+                res = st.session_state.last_result
+                _render_trace(res)
+                st.divider()
+                _render_metrics(res)
+            else:
+                st.info("提一个问题后，这里会显示 Agent 的完整推理轨迹与各项指标。")
             st.divider()
-            _render_metrics(res)
-        else:
-            st.info("提一个问题后，这里会显示 Agent 的完整推理轨迹与各项指标。")
-        st.divider()
-        st.subheader("🩺 健康检查")
-        for name, (ok, msg) in health.items():
-            st.caption(("✅ " if ok else "❌ ") + f"{name}: {msg}")
+            st.subheader("🩺 健康检查")
+            for name, (ok, msg) in health.items():
+                st.caption(("✅ " if ok else "❌ ") + f"{name}: {msg}")
 
 
 if __name__ == "__main__":
