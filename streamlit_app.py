@@ -33,17 +33,6 @@ from observability.trace import TraceRecorder  # noqa: E402
 from retrieval.hybrid import build_retriever  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# 布局常量
-# ---------------------------------------------------------------------------
-
-# 三栏各自独立滚动，所以每栏需要一个确定的高度。
-# `"stretch"` 让容器自适应视口剩余高度（Streamlit >= 1.29 支持 int | "stretch"）。
-# 若在某些环境下 stretch 表现不对（比如容器塌成 0 高），把这里改成整数像素值
-# （例如 640）即可，不需要动其它任何代码。
-PANEL_HEIGHT: int | str = "stretch"
-
-
-# ---------------------------------------------------------------------------
 # 上传区状态管理
 # ---------------------------------------------------------------------------
 
@@ -349,89 +338,78 @@ def main() -> None:
     left, center, right = st.columns([1, 2.4, 1.4])
 
     with left:
-        # 独立滚动区：中栏对话再长，左栏也始终留在屏幕内，不会被落在页面上方
-        with st.container(height=PANEL_HEIGHT):
-            _flash_ingest_report()
-            _upload_panel()
-            st.divider()
-            _doc_panel()
+        _flash_ingest_report()
+        _upload_panel()
+        st.divider()
+        _doc_panel()
 
     with center:
         st.subheader("💬 对话")
-        # 只有消息列表进滚动区。`st.chat_input` 必须留在容器**外面**，
-        # 否则输入框会跟着对话一起被滚走。
-        with st.container(height=PANEL_HEIGHT):
-            for msg in st.session_state.messages:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-                    if msg.get("citations"):
-                        _render_citations(msg["citations"])
-            # 占位子容器：本轮对话要写在滚动区**内部**，但问题得等
-            # chat_input 返回后才知道，所以先占位、后填充。
-            new_turn = st.container()
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("citations"):
+                    _render_citations(msg["citations"])
 
         question = st.chat_input("就你的论文库提问，例如：ViT 用了什么数据集预训练？")
         if question:
             st.session_state.messages.append({"role": "user", "content": question})
-            with new_turn:
-                with st.chat_message("user"):
-                    st.markdown(question)
+            with st.chat_message("user"):
+                st.markdown(question)
 
-                with st.chat_message("assistant"):
-                    if mode.startswith("⚡"):
-                        from generation.rag import RAGEngine
+            with st.chat_message("assistant"):
+                if mode.startswith("⚡"):
+                    from generation.rag import RAGEngine
 
-                        engine = RAGEngine(retriever=_get_retriever(), llm=_get_llm())
-                        text_holder = st.empty()
-                        acc = ""
-                        raw_citations: list = []
-                        for ev in engine.stream_answer(question):
-                            if ev["type"] == "citations":
-                                raw_citations = ev["citations"]
-                            elif ev["type"] == "token":
-                                acc += ev["text"]
-                                text_holder.markdown(acc + "▌")
-                            elif ev["type"] == "error":
-                                st.error(ev["message"])
-                        text_holder.markdown(acc or "（无输出）")
-                        # 事件里的引用是 dict，转成 Citation 后再渲染与入历史，
-                        # 保证两条路径（Agent / RAG）存进 messages 的类型一致。
-                        citations = [Citation(**c) if isinstance(c, dict) else c
-                                     for c in raw_citations]
-                        _render_citations(citations)
-                        st.session_state.messages.append(
-                            {"role": "assistant", "content": acc, "citations": citations}
+                    engine = RAGEngine(retriever=_get_retriever(), llm=_get_llm())
+                    text_holder = st.empty()
+                    acc = ""
+                    raw_citations: list = []
+                    for ev in engine.stream_answer(question):
+                        if ev["type"] == "citations":
+                            raw_citations = ev["citations"]
+                        elif ev["type"] == "token":
+                            acc += ev["text"]
+                            text_holder.markdown(acc + "▌")
+                        elif ev["type"] == "error":
+                            st.error(ev["message"])
+                    text_holder.markdown(acc or "（无输出）")
+                    # 事件里的引用是 dict，转成 Citation 后再渲染与入历史，
+                    # 保证两条路径（Agent / RAG）存进 messages 的类型一致。
+                    citations = [Citation(**c) if isinstance(c, dict) else c
+                                 for c in raw_citations]
+                    _render_citations(citations)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": acc, "citations": citations}
+                    )
+                else:
+                    with st.status("Agent 正在推理…", expanded=False) as status:
+                        result = answer_once(question, st.session_state.session_id)
+                        status.update(
+                            label=f"完成（{len(result.steps)} 步推理，{result.latency_ms.get('total', 0)} ms）",
+                            state="complete",
                         )
-                    else:
-                        with st.status("Agent 正在推理…", expanded=False) as status:
-                            result = answer_once(question, st.session_state.session_id)
-                            status.update(
-                                label=f"完成（{len(result.steps)} 步推理，{result.latency_ms.get('total', 0)} ms）",
-                                state="complete",
-                            )
-                        st.markdown(result.answer)
-                        _render_citations(result.citations)
-                        st.session_state.last_result = result
-                        st.session_state.messages.append(
-                            {"role": "assistant", "content": result.answer,
-                             "citations": result.citations}
-                        )
+                    st.markdown(result.answer)
+                    _render_citations(result.citations)
+                    st.session_state.last_result = result
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": result.answer,
+                         "citations": result.citations}
+                    )
 
     with right:
-        # 与左栏同理：独立滚动区，长对话下不会把轨迹面板甩到视口外
-        with st.container(height=PANEL_HEIGHT):
-            st.subheader("🔍 可观测")
-            if st.session_state.last_result is not None:
-                res = st.session_state.last_result
-                _render_trace(res)
-                st.divider()
-                _render_metrics(res)
-            else:
-                st.info("提一个问题后，这里会显示 Agent 的完整推理轨迹与各项指标。")
+        st.subheader("🔍 可观测")
+        if st.session_state.last_result is not None:
+            res = st.session_state.last_result
+            _render_trace(res)
             st.divider()
-            st.subheader("🩺 健康检查")
-            for name, (ok, msg) in health.items():
-                st.caption(("✅ " if ok else "❌ ") + f"{name}: {msg}")
+            _render_metrics(res)
+        else:
+            st.info("提一个问题后，这里会显示 Agent 的完整推理轨迹与各项指标。")
+        st.divider()
+        st.subheader("🩺 健康检查")
+        for name, (ok, msg) in health.items():
+            st.caption(("✅ " if ok else "❌ ") + f"{name}: {msg}")
 
 
 if __name__ == "__main__":
