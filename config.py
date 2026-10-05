@@ -25,12 +25,12 @@ class Settings(BaseSettings):
     rerank_provider: str = "siliconflow"  # siliconflow | mock
 
     # ---- DeepSeek（生成）----
-    deepseek_api_key: str = ""
+    deepseek_api_key: str = "sk-ea3b2c4c1d75488abe2973f210af3def"
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-flash"
 
     # ---- SiliconFlow（向量化 + 重排序）----
-    siliconflow_api_key: str = ""
+    siliconflow_api_key: str = "sk-kfqexyfquaqrrfifxjsafwfgejxrkyexiqjpdyjicnzynrxx"
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "BAAI/bge-m3"
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
